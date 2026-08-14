@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Comparador de fundos — Mundial Investimentos</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f7f7f5;
+    color: #0b0b0b;
+    margin: 0;
+    padding: 2rem 1rem;
+  }
+  .container { max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 500; margin: 0 0 4px; }
+  .updated { font-size: 13px; color: #6b6b68; margin: 0 0 24px; }
+  .periods { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
+  .periods button {
+    padding: 8px 16px;
+    font-size: 14px;
+    border: 0.5px solid #d3d1c7;
+    border-radius: 8px;
+    background: white;
+    cursor: pointer;
+  }
+  .periods button.active { background: #eeedfe; border-color: #7f77dd; font-weight: 500; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 8px; font-size: 12px; color: #6b6b68; }
+  .legend span { display: flex; align-items: center; gap: 4px; }
+  .dot { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  .chart-wrap { position: relative; width: 100%; height: 320px; margin-bottom: 2rem; background: white; border-radius: 12px; border: 0.5px solid #e1e0d9; padding: 1rem; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+  .card { background: white; border-radius: 12px; border: 0.5px solid #e1e0d9; padding: 1rem 1.25rem; }
+  .card h3 { font-size: 15px; font-weight: 500; margin: 0 0 12px; }
+  .card p { font-size: 13px; margin: 0 0 6px; color: #6b6b68; }
+  .card p b { color: #0b0b0b; font-weight: 500; }
+  .error { color: #a32d2d; font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Comparador de fundos — Mundial Investimentos</h1>
+  <p class="updated" id="updated"></p>
+
+  <div class="periods" id="periods">
+    <button data-p="1">1 ano</button>
+    <button data-p="2">2 anos</button>
+    <button data-p="3">3 anos</button>
+    <button data-p="5">5 anos</button>
+  </div>
+
+  <div class="legend" id="legend"></div>
+
+  <div class="chart-wrap">
+    <canvas id="fundChart" role="img" aria-label="Gráfico de rentabilidade acumulada dos fundos ao longo do prazo selecionado"></canvas>
+  </div>
+
+  <div class="cards" id="cards"></div>
+</div>
+
+<script>
+const COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#4a3aa7'];
+let dataset = null;
+let chart = null;
+let currentPeriod = 5;
+
+async function loadData() {
+  try {
+    const res = await fetch('./data/funds.json');
+    if (!res.ok) throw new Error('Arquivo de dados não encontrado');
+    dataset = await res.json();
+    document.getElementById('updated').textContent =
+      'Atualizado em ' + new Date(dataset.updatedAt).toLocaleString('pt-BR');
+    renderLegend();
+    setPeriod(5);
+  } catch (err) {
+    document.querySelector('.container').innerHTML +=
+      '<p class="error">Não foi possível carregar os dados (' + err.message + '). O workflow de atualização precisa rodar pelo menos uma vez.</p>';
+  }
+}
+
+function allSeries() {
+  const list = dataset.funds.map((f, i) => ({ name: f.name, color: COLORS[i % COLORS.length], metrics: f.metrics }));
+  list.push({ name: 'CDI (benchmark)', color: '#898781', metrics: dataset.cdi.metrics });
+  return list;
+}
+
+function renderLegend() {
+  document.getElementById('legend').innerHTML = allSeries().map(s =>
+    `<span><span class="dot" style="background:${s.color}"></span>${s.name}</span>`
+  ).join('');
+}
+
+function renderChart(years) {
+  const series = allSeries();
+  const labels = ['início', ...series.map((_, i) => '')].slice(0, 2).concat(['agora']);
+  // gráfico simples de 2 pontos (início -> retorno acumulado do período), já que só temos o resumo por prazo
+  const chartLabels = ['início', `${years} ano(s)`];
+
+  const cfg = {
+    type: 'line',
+    data: {
+      labels: chartLabels,
+      datasets: series.map(s => ({
+        label: s.name,
+        data: [0, s.metrics[years] ? s.metrics[years].retorno : 0],
+        borderColor: s.color,
+        backgroundColor: s.color,
+        borderWidth: 2,
+        pointRadius: 4,
+        tension: 0
+      }))
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { ticks: { callback: v => v + '%' }, grid: { color: 'rgba(137,135,129,0.2)' } },
+        x: { grid: { display: false } }
+      }
+    }
+  };
+
+  if (chart) chart.destroy();
+  chart = new Chart(document.getElementById('fundChart'), cfg);
+}
+
+function renderCards(years) {
+  document.getElementById('cards').innerHTML = allSeries().map(s => {
+    const m = s.metrics[years] || {};
+    return `
+      <div class="card">
+        <h3>${s.name}</h3>
+        <p>Rentabilidade: <b>${m.retorno ?? '—'}%</b></p>
+        <p>Volatilidade: <b>${m.volatilidade ?? '—'}%</b></p>
+        <p>Sharpe: <b>${m.sharpe ?? '—'}</b></p>
+      </div>
+    `;
+  }).join('');
+}
+
+function setPeriod(years) {
+  currentPeriod = years;
+  renderChart(years);
+  renderCards(years);
+  document.querySelectorAll('#periods button').forEach(b => {
+    b.classList.toggle('active', Number(b.dataset.p) === years);
+  });
+}
+
+document.querySelectorAll('#periods button').forEach(b => {
+  b.addEventListener('click', () => setPeriod(Number(b.dataset.p)));
+});
+
+loadData();
+</script>
+</body>
+</html>
