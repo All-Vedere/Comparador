@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Comparador de fundos — Mundial Investimentos</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -16,33 +17,53 @@
   }
   .container { max-width: 900px; margin: 0 auto; }
   h1 { font-size: 22px; font-weight: 500; margin: 0 0 4px; }
-  .updated { font-size: 13px; color: #6b6b68; margin: 0 0 24px; }
+  .subtitle { font-size: 13px; color: #6b6b68; margin: 0 0 24px; }
+  .add-fund { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
+  .add-fund input {
+    flex: 1; min-width: 220px; padding: 10px 12px; font-size: 14px;
+    border: 0.5px solid #d3d1c7; border-radius: 8px;
+  }
+  .add-fund button {
+    padding: 10px 18px; font-size: 14px; border: 0.5px solid #d3d1c7;
+    border-radius: 8px; background: #eeedfe; border-color: #7f77dd;
+    font-weight: 500; cursor: pointer;
+  }
+  .status { font-size: 13px; color: #6b6b68; margin-bottom: 16px; min-height: 18px; }
+  .status.error { color: #a32d2d; }
   .periods { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
   .periods button {
-    padding: 8px 16px;
-    font-size: 14px;
-    border: 0.5px solid #d3d1c7;
-    border-radius: 8px;
-    background: white;
-    cursor: pointer;
+    padding: 8px 16px; font-size: 14px; border: 0.5px solid #d3d1c7;
+    border-radius: 8px; background: white; cursor: pointer;
   }
   .periods button.active { background: #eeedfe; border-color: #7f77dd; font-weight: 500; }
   .legend { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 8px; font-size: 12px; color: #6b6b68; }
   .legend span { display: flex; align-items: center; gap: 4px; }
   .dot { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
-  .chart-wrap { position: relative; width: 100%; height: 320px; margin-bottom: 2rem; background: white; border-radius: 12px; border: 0.5px solid #e1e0d9; padding: 1rem; }
+  .chart-wrap {
+    position: relative; width: 100%; height: 320px; margin-bottom: 2rem;
+    background: white; border-radius: 12px; border: 0.5px solid #e1e0d9; padding: 1rem;
+  }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
-  .card { background: white; border-radius: 12px; border: 0.5px solid #e1e0d9; padding: 1rem 1.25rem; }
-  .card h3 { font-size: 15px; font-weight: 500; margin: 0 0 12px; }
+  .card { background: white; border-radius: 12px; border: 0.5px solid #e1e0d9; padding: 1rem 1.25rem; position: relative; }
+  .card h3 { font-size: 15px; font-weight: 500; margin: 0 0 12px; padding-right: 20px; }
   .card p { font-size: 13px; margin: 0 0 6px; color: #6b6b68; }
   .card p b { color: #0b0b0b; font-weight: 500; }
-  .error { color: #a32d2d; font-size: 14px; }
+  .card .remove {
+    position: absolute; top: 12px; right: 12px; border: none; background: none;
+    cursor: pointer; color: #a32d2d; font-size: 16px; line-height: 1;
+  }
 </style>
 </head>
 <body>
 <div class="container">
   <h1>Comparador de fundos — Mundial Investimentos</h1>
-  <p class="updated" id="updated"></p>
+  <p class="subtitle">Digite o CNPJ de qualquer fundo para adicionar à comparação. Os dados vêm direto do Portal de Dados Abertos da CVM e do Banco Central — tudo calculado aqui no navegador.</p>
+
+  <div class="add-fund">
+    <input type="text" id="cnpjInput" placeholder="CNPJ do fundo (ex: 00.000.000/0001-00)" />
+    <button id="addBtn">Adicionar fundo</button>
+  </div>
+  <p class="status" id="status"></p>
 
   <div class="periods" id="periods">
     <button data-p="1">1 ano</button>
@@ -62,28 +83,191 @@
 
 <script>
 const COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#4a3aa7'];
-let dataset = null;
+const CVM_BASE_URL = 'https://dados.cvm.gov.br/dados/FI/DOC/INF_DIARIO/DADOS';
+const BCB_CDI_URL = 'https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados?formato=json';
+
+let funds = [];
+let cdiMetrics = null;
 let chart = null;
 let currentPeriod = 5;
 
-async function loadData() {
+function round(v, d) { const f = Math.pow(10, d); return Math.round(v * f) / f; }
+
+function cumulativeReturn(monthlyReturns) {
+  const total = monthlyReturns.reduce((acc, r) => acc * (1 + r), 1);
+  return round((total - 1) * 100, 2);
+}
+function annualizedReturn(monthlyReturns) {
+  const n = monthlyReturns.length;
+  if (n === 0) return 0;
+  const total = monthlyReturns.reduce((acc, r) => acc * (1 + r), 1);
+  return round((Math.pow(total, 12 / n) - 1) * 100, 2);
+}
+function annualizedVolatility(monthlyReturns) {
+  const n = monthlyReturns.length;
+  if (n < 2) return 0;
+  const mean = monthlyReturns.reduce((a, b) => a + b, 0) / n;
+  const variance = monthlyReturns.reduce((acc, r) => acc + Math.pow(r - mean, 2), 0) / (n - 1);
+  return round(Math.sqrt(variance) * Math.sqrt(12) * 100, 2);
+}
+function sharpeRatio(monthlyReturns, riskFreeMonthlyReturns) {
+  const fundAnnual = annualizedReturn(monthlyReturns) / 100;
+  const rfAnnual = annualizedReturn(riskFreeMonthlyReturns) / 100;
+  const vol = annualizedVolatility(monthlyReturns) / 100;
+  if (vol === 0) return 0;
+  return round((fundAnnual - rfAnnual) / vol, 2);
+}
+function lastNMonths(series, months) { return series.slice(Math.max(0, series.length - months)); }
+function computeMetricsForPeriods(fundReturns, cdiReturns, periods = [1, 2, 3, 5]) {
+  const result = {};
+  for (const years of periods) {
+    const months = years * 12;
+    const f = lastNMonths(fundReturns, months);
+    const c = lastNMonths(cdiReturns, months);
+    result[years] = {
+      retorno: cumulativeReturn(f),
+      retornoAnualizado: annualizedReturn(f),
+      volatilidade: annualizedVolatility(f),
+      sharpe: sharpeRatio(f, c)
+    };
+  }
+  return result;
+}
+
+function lastNMonthKeys(n) {
+  const keys = [];
+  const now = new Date();
+  for (let i = n; i >= 1; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    keys.push(`${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}`);
+  }
+  return keys;
+}
+
+async function fetchMonthlyInformeCsv(monthKey) {
+  const url = `${CVM_BASE_URL}/inf_diario_fi_${monthKey}.zip`;
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  const buffer = await res.arrayBuffer();
+  const zip = await JSZip.loadAsync(buffer);
+  const fileName = Object.keys(zip.files)[0];
+  return await zip.files[fileName].async('string');
+}
+
+function parseFundQuotesFromCsv(csvText, cnpjDigits) {
+  const lines = csvText.split('\n');
+  const header = lines[0].split(';');
+  const idxCnpj = header.indexOf('CNPJ_FUNDO');
+  const idxData = header.indexOf('DT_COMPTC');
+  const idxCota = header.indexOf('VL_QUOTA');
+  const quotes = [];
+  for (let i = 1; i < lines.length; i++) {
+    const row = lines[i].split(';');
+    if (row.length < header.length) continue;
+    const rowCnpj = row[idxCnpj].replace(/[^\d]/g, '');
+    if (rowCnpj !== cnpjDigits) continue;
+    quotes.push({ date: row[idxData], value: parseFloat(row[idxCota]) });
+  }
+  return quotes;
+}
+
+async function fetchFundMonthlyReturns(cnpjDigits, months = 60) {
+  const monthKeys = lastNMonthKeys(months);
+  const monthEndQuotes = [];
+  for (const monthKey of monthKeys) {
+    const csv = await fetchMonthlyInformeCsv(monthKey);
+    if (!csv) continue;
+    const quotes = parseFundQuotesFromCsv(csv, cnpjDigits);
+    if (quotes.length === 0) continue;
+    quotes.sort((a, b) => a.date.localeCompare(b.date));
+    monthEndQuotes.push(quotes[quotes.length - 1].value);
+  }
+  if (monthEndQuotes.length < 2) return { returns: [] };
+  const returns = [];
+  for (let i = 1; i < monthEndQuotes.length; i++) {
+    returns.push(monthEndQuotes[i] / monthEndQuotes[i - 1] - 1);
+  }
+  return { returns };
+}
+
+async function fetchCdiMonthlyReturns() {
+  const res = await fetch(BCB_CDI_URL);
+  if (!res.ok) throw new Error('Falha ao buscar CDI no Banco Central');
+  const daily = await res.json();
+  const byMonth = {};
+  for (const { data, valor } of daily) {
+    const [, mm, yyyy] = data.split('/');
+    const key = `${yyyy}-${mm}`;
+    const d = parseFloat(valor) / 100;
+    byMonth[key] = (byMonth[key] || 1) * (1 + d);
+  }
+  return Object.keys(byMonth).sort().map(k => byMonth[k] - 1);
+}
+
+function setStatus(msg, isError) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = 'status' + (isError ? ' error' : '');
+}
+
+async function addFund() {
+  const raw = document.getElementById('cnpjInput').value;
+  const cnpjDigits = raw.replace(/[^\d]/g, '');
+  if (cnpjDigits.length !== 14) {
+    setStatus('CNPJ inválido — deve ter 14 dígitos.', true);
+    return;
+  }
+  if (funds.some(f => f.cnpj === cnpjDigits)) {
+    setStatus('Esse fundo já está na comparação.', true);
+    return;
+  }
+
+  setStatus('Buscando dados na CVM (pode levar alguns segundos)...');
+  document.getElementById('addBtn').disabled = true;
+
   try {
-    const res = await fetch('./data/funds.json');
-    if (!res.ok) throw new Error('Arquivo de dados não encontrado');
-    dataset = await res.json();
-    document.getElementById('updated').textContent =
-      'Atualizado em ' + new Date(dataset.updatedAt).toLocaleString('pt-BR');
-    renderLegend();
-    setPeriod(5);
+    if (!cdiMetrics) {
+      const cdiReturns = await fetchCdiMonthlyReturns();
+      cdiMetrics = { returns: cdiReturns, metrics: computeMetricsForPeriods(cdiReturns, cdiReturns) };
+    }
+
+    const { returns } = await fetchFundMonthlyReturns(cnpjDigits, 60);
+    if (returns.length < 12) {
+      setStatus('Não foi possível encontrar histórico suficiente para esse CNPJ. Confira se está correto.', true);
+      document.getElementById('addBtn').disabled = false;
+      return;
+    }
+
+    const metrics = computeMetricsForPeriods(returns, cdiMetrics.returns);
+    funds.push({
+      cnpj: cnpjDigits,
+      name: cnpjDigits.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/, '$1.$2.$3/$4-$5'),
+      metrics,
+      color: COLORS[funds.length % COLORS.length]
+    });
+
+    document.getElementById('cnpjInput').value = '';
+    setStatus('');
+    renderAll();
   } catch (err) {
-    document.querySelector('.container').innerHTML +=
-      '<p class="error">Não foi possível carregar os dados (' + err.message + '). O workflow de atualização precisa rodar pelo menos uma vez.</p>';
+    setStatus(
+      'Não foi possível buscar os dados diretamente da CVM pelo navegador (provavelmente bloqueio de CORS). ' +
+      'Erro: ' + err.message,
+      true
+    );
+  } finally {
+    document.getElementById('addBtn').disabled = false;
   }
 }
 
+function removeFund(cnpj) {
+  funds = funds.filter(f => f.cnpj !== cnpj);
+  renderAll();
+}
+
 function allSeries() {
-  const list = dataset.funds.map((f, i) => ({ name: f.name, color: COLORS[i % COLORS.length], metrics: f.metrics }));
-  list.push({ name: 'CDI (benchmark)', color: '#898781', metrics: dataset.cdi.metrics });
+  const list = funds.map(f => ({ name: f.name, color: f.color, metrics: f.metrics, cnpj: f.cnpj }));
+  if (cdiMetrics) list.push({ name: 'CDI (benchmark)', color: '#898781', metrics: cdiMetrics.metrics, cnpj: null });
   return list;
 }
 
@@ -95,14 +279,10 @@ function renderLegend() {
 
 function renderChart(years) {
   const series = allSeries();
-  const labels = ['início', ...series.map((_, i) => '')].slice(0, 2).concat(['agora']);
-  // gráfico simples de 2 pontos (início -> retorno acumulado do período), já que só temos o resumo por prazo
-  const chartLabels = ['início', `${years} ano(s)`];
-
   const cfg = {
     type: 'line',
     data: {
-      labels: chartLabels,
+      labels: ['início', `${years} ano(s)`],
       datasets: series.map(s => ({
         label: s.name,
         data: [0, s.metrics[years] ? s.metrics[years].retorno : 0],
@@ -123,7 +303,6 @@ function renderChart(years) {
       }
     }
   };
-
   if (chart) chart.destroy();
   chart = new Chart(document.getElementById('fundChart'), cfg);
 }
@@ -131,8 +310,10 @@ function renderChart(years) {
 function renderCards(years) {
   document.getElementById('cards').innerHTML = allSeries().map(s => {
     const m = s.metrics[years] || {};
+    const removeBtn = s.cnpj ? `<button class="remove" onclick="removeFund('${s.cnpj}')" aria-label="Remover">×</button>` : '';
     return `
       <div class="card">
+        ${removeBtn}
         <h3>${s.name}</h3>
         <p>Rentabilidade: <b>${m.retorno ?? '—'}%</b></p>
         <p>Volatilidade: <b>${m.volatilidade ?? '—'}%</b></p>
@@ -142,10 +323,15 @@ function renderCards(years) {
   }).join('');
 }
 
+function renderAll() {
+  renderLegend();
+  renderChart(currentPeriod);
+  renderCards(currentPeriod);
+}
+
 function setPeriod(years) {
   currentPeriod = years;
-  renderChart(years);
-  renderCards(years);
+  renderAll();
   document.querySelectorAll('#periods button').forEach(b => {
     b.classList.toggle('active', Number(b.dataset.p) === years);
   });
@@ -154,8 +340,10 @@ function setPeriod(years) {
 document.querySelectorAll('#periods button').forEach(b => {
   b.addEventListener('click', () => setPeriod(Number(b.dataset.p)));
 });
+document.getElementById('addBtn').addEventListener('click', addFund);
+document.getElementById('cnpjInput').addEventListener('keydown', e => { if (e.key === 'Enter') addFund(); });
 
-loadData();
+setPeriod(5);
 </script>
 </body>
 </html>
